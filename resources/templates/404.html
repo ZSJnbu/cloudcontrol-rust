@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>404 - 页面未找到 | CloudControl</title>
+  <link rel="stylesheet" href="/static/css/terminal-theme.css">
+  <style>
+    .term-error-page {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+    }
+
+    .term-error-ascii {
+      font-family: var(--term-font);
+      font-size: 10px;
+      line-height: 1.2;
+      color: var(--term-green);
+      text-shadow: var(--term-text-shadow);
+      white-space: pre;
+      margin-bottom: 32px;
+    }
+
+    .term-error-code {
+      font-family: var(--term-font-display);
+      font-size: 8rem;
+      font-weight: bold;
+      color: var(--term-green);
+      text-shadow:
+        0 0 10px var(--term-green-glow),
+        0 0 20px var(--term-green-glow),
+        0 0 40px var(--term-green-glow);
+      line-height: 1;
+      margin-bottom: 16px;
+      animation: flicker 0.15s infinite;
+    }
+
+    @keyframes flicker {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.95; }
+      75% { opacity: 0.98; }
+    }
+
+    .term-error-title {
+      font-family: var(--term-font);
+      font-size: 1.5rem;
+      color: var(--term-green);
+      margin-bottom: 24px;
+      text-transform: uppercase;
+      letter-spacing: 0.2em;
+    }
+
+    .term-error-message {
+      font-family: var(--term-font);
+      font-size: 0.9rem;
+      color: var(--term-gray);
+      max-width: 500px;
+      margin-bottom: 32px;
+      line-height: 1.8;
+    }
+
+    .term-error-message .term-prompt {
+      color: var(--term-cyan);
+    }
+
+    .term-error-message .term-error-text {
+      color: var(--term-red);
+    }
+
+    .term-error-actions {
+      display: flex;
+      gap: 16px;
+    }
+
+    .term-error-footer {
+      position: absolute;
+      bottom: 24px;
+      font-family: var(--term-font);
+      font-size: 0.75rem;
+      color: var(--term-gray);
+    }
+
+    @media (max-width: 768px) {
+      .term-error-code {
+        font-size: 5rem;
+      }
+
+      .term-error-ascii {
+        font-size: 6px;
+      }
+
+      .term-error-actions {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body class="term-body">
+  <div class="term-error-page">
+    <pre class="term-error-ascii">
+   _____ _       _   _ ____   ____            _             _
+  / ____| |     | | | |  _ \ / ___|___  _ __ | |_ _ __ ___ | |
+ | |    | | ___ | | | | | | | |   / _ \| '_ \| __| '__/ _ \| |
+ | |    | |/ _ \| |_| | |_| | |__| (_) | | | | |_| | | (_) | |
+ |_|____|_|\___/ \___/|____/ \____\___/|_| |_|\__|_|  \___/|_|
+    </pre>
+
+    <div class="term-error-code" data-text="404">404</div>
+
+    <h1 class="term-error-title">// TARGET_NOT_FOUND</h1>
+
+    <div class="term-error-message">
+      <span class="term-prompt">root@cloudcontrol</span>:<span style="color: var(--term-blue);">~</span>$ locate requested_resource<br>
+      <span class="term-error-text">[ERROR]</span> 请求的页面不存在或已被移除<br>
+      <span class="term-error-text">[ERROR]</span> 请检查 URL 是否正确<br>
+      <br>
+      <span style="color: var(--term-gray);">// 按下方按钮返回</span>
+    </div>
+
+    <div class="term-error-actions">
+      <a href="/" class="term-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          <polyline points="9 22 9 12 15 12 15 22"/>
+        </svg>
+        [HOME]
+      </a>
+      <button onclick="history.back()" class="term-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="19" y1="12" x2="5" y2="12"/>
+          <polyline points="12 19 5 12 12 5"/>
+        </svg>
+        [BACK]
+      </button>
+    </div>
+
+    <div class="term-error-footer">
+      <span class="term-cursor"></span> SYSTEM_STATUS: OPERATIONAL
+    </div>
+  </div>
+</body>
+</html>

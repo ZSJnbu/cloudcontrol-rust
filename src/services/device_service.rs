@@ -1,0 +1,79 @@
+use crate::device::atx_client::AtxClient;
+use crate::utils::hierarchy;
+use base64::Engine;
+use serde_json::Value;
+
+/// High-level device operations wrapping AtxClient.
+/// Replaces Python `AndroidDevice` class.
+pub struct DeviceService;
+
+impl DeviceService {
+    /// Take a screenshot and return base64-encoded JPEG.
+    pub async fn screenshot_base64(
+        client: &AtxClient,
+        quality: u8,
+        scale: f64,
+    ) -> Result<String, String> {
+        let jpeg_bytes = client.screenshot().await?;
+
+        // If scale < 1.0, resize the image
+        let output_bytes = if scale < 1.0 {
+            Self::resize_jpeg(&jpeg_bytes, quality, scale)?
+        } else if quality < 95 {
+            Self::recompress_jpeg(&jpeg_bytes, quality)?
+        } else {
+            jpeg_bytes
+        };
+
+        Ok(base64::engine::general_purpose::STANDARD.encode(&output_bytes))
+    }
+
+    /// Take a screenshot and return raw JPEG bytes.
+    pub async fn screenshot_jpeg(
+        client: &AtxClient,
+        quality: u8,
+        scale: f64,
+    ) -> Result<Vec<u8>, String> {
+        let jpeg_bytes = client.screenshot().await?;
+
+        if scale < 1.0 || quality < 95 {
+            Self::resize_jpeg(&jpeg_bytes, quality, scale)
+        } else {
+            Ok(jpeg_bytes)
+        }
+    }
+
+    /// Resize and recompress JPEG data.
+    fn resize_jpeg(data: &[u8], quality: u8, scale: f64) -> Result<Vec<u8>, String> {
+        let img = image::load_from_memory(data)
+            .map_err(|e| format!("Failed to decode image: {}", e))?;
+
+        let img = if scale < 1.0 {
+            let new_w = (img.width() as f64 * scale) as u32;
+            let new_h = (img.height() as f64 * scale) as u32;
+            img.resize(new_w, new_h, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
+
+        let rgb = img.to_rgb8();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+        encoder
+            .encode_image(&rgb)
+            .map_err(|e| format!("JPEG encode failed: {}", e))?;
+
+        Ok(buf.into_inner())
+    }
+
+    /// Recompress JPEG data at a different quality.
+    fn recompress_jpeg(data: &[u8], quality: u8) -> Result<Vec<u8>, String> {
+        Self::resize_jpeg(data, quality, 1.0)
+    }
+
+    /// Dump and parse UI hierarchy to JSON.
+    pub async fn dump_hierarchy(client: &AtxClient) -> Result<Value, String> {
+        let xml = client.dump_hierarchy().await?;
+        hierarchy::xml_to_json(&xml)
+    }
+}

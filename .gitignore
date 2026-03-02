@@ -1,0 +1,26 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Database files (runtime generated)
+database/*.db
+*.db
+
+# Log files
+log/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
+.env

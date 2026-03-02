@@ -1,0 +1,345 @@
+mod common;
+
+use actix_web::{test, web, App};
+use cloudcontrol::pool::connection_pool::ConnectionPool;
+use cloudcontrol::routes;
+use cloudcontrol::state::AppState;
+use common::{create_temp_db, make_device_json, make_test_config};
+use serde_json::{json, Value};
+use std::time::Duration;
+
+/// Helper macro to create a test app and avoid type inference issues.
+/// Returns (TempDir, AppState, app_service) where app_service is used via test::call_service.
+macro_rules! setup_test_app {
+    () => {{
+        let (tmp, db) = create_temp_db().await;
+        let config = make_test_config();
+        let pool = ConnectionPool::new(100, Duration::from_secs(60));
+        let tera = tera::Tera::new("resources/templates/**/*").unwrap();
+        let state = AppState::new(db, config, pool, tera, "127.0.0.1".to_string());
+
+        let app_state = state.clone();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(app_state))
+                .route("/", web::get().to(routes::control::index))
+                .route("/devices/{udid}/remote", web::get().to(routes::control::remote))
+                .route("/installfile", web::get().to(routes::control::installfile))
+                .route("/list", web::get().to(routes::control::device_list))
+                .route("/devices/{udid}/info", web::get().to(routes::control::device_info))
+                .route("/inspector/{udid}/screenshot", web::get().to(routes::control::inspector_screenshot))
+                .route("/inspector/{udid}/touch", web::post().to(routes::control::inspector_touch))
+                .route("/inspector/{udid}/input", web::post().to(routes::control::inspector_input))
+                .route("/inspector/{udid}/keyevent", web::post().to(routes::control::inspector_keyevent))
+                .route("/heartbeat", web::post().to(routes::control::heartbeat))
+                .route("/shell", web::post().to(routes::control::shell))
+                .route("/api/wifi-connect", web::post().to(routes::control::wifi_connect))
+                .route("/files", web::get().to(routes::control::files))
+                .route("/file/delete/{group}/{filename}", web::get().to(routes::control::file_delete))
+                .route("/nio/stats", web::get().to(routes::nio::nio_stats)),
+        )
+        .await;
+
+        (tmp, state, app)
+    }};
+}
+
+/// Helper to insert a mock device directly into the test DB.
+async fn insert_device(state: &AppState, udid: &str, present: bool, is_mock: bool) {
+    let data = make_device_json(udid, present, is_mock);
+    state.db.upsert(udid, &data).await.unwrap();
+}
+
+// ═══════════════ PAGE ROUTES ═══════════════
+
+#[actix_web::test]
+async fn test_index_page() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::get().uri("/").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.contains("text/html"));
+}
+
+#[actix_web::test]
+async fn test_installfile_page() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::get().uri("/installfile").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+}
+
+#[actix_web::test]
+async fn test_remote_page_not_found() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::get()
+        .uri("/devices/nonexistent-udid/remote")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[actix_web::test]
+async fn test_remote_page_with_device() {
+    let (_tmp, state, app) = setup_test_app!();
+    insert_device(&state, "remote-test-dev", true, false).await;
+
+    let req = test::TestRequest::get()
+        .uri("/devices/remote-test-dev/remote")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+}
+
+// ═══════════════ DEVICE API ═══════════════
+
+#[actix_web::test]
+async fn test_device_list_empty() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::get().uri("/list").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert!(body.is_array());
+    assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+#[actix_web::test]
+async fn test_device_list_with_devices() {
+    let (_tmp, state, app) = setup_test_app!();
+    insert_device(&state, "list-dev-1", true, false).await;
+    insert_device(&state, "list-dev-2", true, false).await;
+    insert_device(&state, "list-dev-3", true, false).await;
+
+    let req = test::TestRequest::get().uri("/list").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body.as_array().unwrap().len(), 3);
+}
+
+#[actix_web::test]
+async fn test_device_info_found() {
+    let (_tmp, state, app) = setup_test_app!();
+    insert_device(&state, "info-dev", true, false).await;
+
+    let req = test::TestRequest::get()
+        .uri("/devices/info-dev/info")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["udid"], "info-dev");
+    assert_eq!(body["model"], "TestPhone");
+}
+
+#[actix_web::test]
+async fn test_device_info_not_found() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::get()
+        .uri("/devices/nonexistent/info")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+// ═══════════════ HEARTBEAT ═══════════════
+
+#[actix_web::test]
+async fn test_heartbeat_new_session() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::post()
+        .uri("/heartbeat")
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload("identifier=heartbeat-test-1")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body = test::read_body(resp).await;
+    assert_eq!(body, "hello kitty");
+}
+
+#[actix_web::test]
+async fn test_heartbeat_updates_session() {
+    let (_tmp, _state, app) = setup_test_app!();
+
+    // First heartbeat
+    let req1 = test::TestRequest::post()
+        .uri("/heartbeat")
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload("identifier=hb-update-test")
+        .to_request();
+    let resp1 = test::call_service(&app, req1).await;
+    assert_eq!(resp1.status(), 200);
+
+    // Second heartbeat (same identifier)
+    let req2 = test::TestRequest::post()
+        .uri("/heartbeat")
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload("identifier=hb-update-test")
+        .to_request();
+    let resp2 = test::call_service(&app, req2).await;
+    assert_eq!(resp2.status(), 200);
+
+    let body = test::read_body(resp2).await;
+    assert_eq!(body, "hello kitty");
+}
+
+#[actix_web::test]
+async fn test_heartbeat_missing_identifier() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::post()
+        .uri("/heartbeat")
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload("")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+// ═══════════════ FILES MANAGEMENT ═══════════════
+
+#[actix_web::test]
+async fn test_files_empty() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::get().uri("/files").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["data"].as_array().unwrap().len(), 0);
+}
+
+#[actix_web::test]
+async fn test_files_pagination() {
+    let (_tmp, state, app) = setup_test_app!();
+
+    // Insert 8 files directly via DB
+    for i in 0..8i64 {
+        state
+            .db
+            .save_install_file("0", &format!("file_{}.apk", i), Some(1000 + i), "2024-01-01", "admin", None)
+            .await
+            .unwrap();
+    }
+
+    let req = test::TestRequest::get().uri("/files?page=1").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["total"], 8);
+    assert_eq!(body["per_page"], 5);
+    assert_eq!(body["current_page"], 1);
+    assert_eq!(body["data"].as_array().unwrap().len(), 5);
+}
+
+#[actix_web::test]
+async fn test_file_delete_redirect() {
+    let (_tmp, state, app) = setup_test_app!();
+
+    state
+        .db
+        .save_install_file("0", "test.apk", Some(512), "2024-01-01", "admin", None)
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::get()
+        .uri("/file/delete/0/test.apk")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 302);
+    let location = resp.headers().get("Location").unwrap().to_str().unwrap();
+    assert_eq!(location, "/installfile");
+}
+
+// ═══════════════ MOCK DEVICE SCREENSHOT ═══════════════
+
+#[actix_web::test]
+async fn test_mock_screenshot_base64() {
+    let (_tmp, state, app) = setup_test_app!();
+    insert_device(&state, "mock-screenshot-dev", true, true).await;
+
+    let req = test::TestRequest::get()
+        .uri("/inspector/mock-screenshot-dev/screenshot")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["type"], "jpeg");
+    assert_eq!(body["encoding"], "base64");
+    assert!(body["data"].as_str().unwrap().len() > 100, "base64 data should be non-trivial");
+}
+
+#[actix_web::test]
+async fn test_mock_touch_ok() {
+    let (_tmp, state, app) = setup_test_app!();
+    insert_device(&state, "mock-touch-dev", true, true).await;
+
+    let req = test::TestRequest::post()
+        .uri("/inspector/mock-touch-dev/touch")
+        .set_json(json!({"action": "click", "x": 540, "y": 960}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"], "ok");
+}
+
+// ═══════════════ INPUT VALIDATION ═══════════════
+
+#[actix_web::test]
+async fn test_touch_missing_coordinates() {
+    let (_tmp, state, app) = setup_test_app!();
+    insert_device(&state, "touch-val-dev", true, false).await;
+
+    let req = test::TestRequest::post()
+        .uri("/inspector/touch-val-dev/touch")
+        .set_json(json!({"action": "click"})) // Missing x, y
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn test_wifi_connect_missing_address() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::post()
+        .uri("/api/wifi-connect")
+        .set_json(json!({"address": ""}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn test_wifi_connect_invalid_format() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::post()
+        .uri("/api/wifi-connect")
+        .set_json(json!({"address": "192.168.1.100"})) // No port
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+// ═══════════════ NIO STATS ═══════════════
+
+#[actix_web::test]
+async fn test_nio_stats() {
+    let (_tmp, _state, app) = setup_test_app!();
+    let req = test::TestRequest::get().uri("/nio/stats").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert!(body.is_object());
+}
