@@ -53,31 +53,51 @@ impl DeviceDetector {
             model.replace(' ', "_")
         );
 
-        // Determine IP and port for atx-agent connection
-        // New uiautomator2 uses port 9008, old atx-agent uses 7912
-        let device_port: u16 = 9008;
+        // Determine IP and port for device server connection
+        // Use device WiFi IP for direct network access (low latency)
+        // Port 9008 = new u2.jar Java server, Port 7912 = old atx-agent
+        let device_port: i64 = 9008;
 
         let (ip, agent_port): (String, i64) = if Adb::is_usb_serial(serial)
             || serial.starts_with("emulator-")
         {
-            // USB or emulator: use adb forward to reach device server
-            match Adb::forward(serial, device_port).await {
-                Ok(local_port) => {
-                    tracing::info!(
-                        "[Detector] ADB forward established: 127.0.0.1:{} -> {}:{}",
-                        local_port,
-                        serial,
-                        device_port
-                    );
-                    ("127.0.0.1".to_string(), local_port as i64)
-                }
-                Err(e) => {
-                    tracing::warn!("[Detector] ADB forward failed for {}: {}", serial, e);
-                    // Fallback: try to get WiFi IP
-                    let ip = Adb::shell(serial, "ip route | grep 'src' | head -1 | awk '{print $NF}'")
-                        .await
-                        .unwrap_or_else(|_| "127.0.0.1".to_string());
-                    (ip, device_port as i64)
+            // USB device: get WiFi IP for direct network connection (much faster than ADB forward)
+            let wifi_ip = Adb::shell(serial, "ip route | grep wlan0 | awk '{print $9}'")
+                .await
+                .unwrap_or_default();
+            let wifi_ip = wifi_ip.trim().to_string();
+
+            if !wifi_ip.is_empty() && wifi_ip.contains('.') {
+                tracing::info!(
+                    "[Detector] Using device WiFi IP: {} (port {})",
+                    wifi_ip,
+                    device_port
+                );
+                (wifi_ip, device_port)
+            } else {
+                // Fallback: use ADB forward if WiFi IP unavailable
+                tracing::warn!(
+                    "[Detector] WiFi IP not available for {}, falling back to ADB forward",
+                    serial
+                );
+                match Adb::forward(serial, device_port as u16).await {
+                    Ok(local_port) => {
+                        tracing::info!(
+                            "[Detector] ADB forward fallback: 127.0.0.1:{} -> {}:{}",
+                            local_port,
+                            serial,
+                            device_port
+                        );
+                        ("127.0.0.1".to_string(), local_port as i64)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[Detector] ADB forward also failed for {}: {}",
+                            serial,
+                            e
+                        );
+                        ("127.0.0.1".to_string(), device_port)
+                    }
                 }
             }
         } else {
@@ -87,7 +107,7 @@ impl DeviceDetector {
                 .next()
                 .unwrap_or("127.0.0.1")
                 .to_string();
-            (ip, device_port as i64)
+            (ip, device_port)
         };
 
         let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();

@@ -15,8 +15,9 @@ pub struct AtxClient {
 impl AtxClient {
     pub fn new(ip: &str, port: i64, udid: &str) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(3))
+            .no_proxy()
             .build()
             .unwrap_or_default();
 
@@ -29,8 +30,9 @@ impl AtxClient {
 
     pub fn from_url(url: &str, udid: &str) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(3))
+            .no_proxy()
             .build()
             .unwrap_or_default();
 
@@ -62,7 +64,7 @@ impl AtxClient {
         let resp = self
             .client
             .get(&url)
-            .timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(5))
             .send()
             .await
             .map_err(|e| format!("Screenshot request failed: {}", e))?;

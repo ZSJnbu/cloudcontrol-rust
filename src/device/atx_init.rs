@@ -77,6 +77,7 @@ impl AtxInit {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(800))
             .connect_timeout(Duration::from_millis(500))
+            .no_proxy()
             .build()
             .unwrap_or_default();
 

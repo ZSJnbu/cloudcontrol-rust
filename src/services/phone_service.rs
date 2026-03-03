@@ -22,6 +22,7 @@ impl PhoneService {
         let url = format!("http://{}:9008/info", host);
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
+            .no_proxy()
             .build()
             .unwrap_or_default();
 
