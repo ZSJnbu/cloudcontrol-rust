@@ -320,8 +320,17 @@
     #xterm {
       height: 100%;
       min-height: 400px;
-      background: #000;
+      background: #0a0a0a;
       overflow: hidden;
+    }
+
+    #xterm .terminal {
+      background: #0a0a0a;
+      color: #00ff41;
+    }
+
+    #xterm .terminal-cursor {
+      background: #00ff41;
     }
 
     /* Dropzone */
@@ -1001,7 +1010,7 @@
             </svg>
             INFO
           </button>
-          <button class="term-tab" :class="{active: activeTab === 'terminal'}" @click="activeTab = 'terminal'">
+          <button class="term-tab" :class="{active: activeTab === 'terminal'}" @click="activeTab = 'terminal'; $nextTick(function(){ initShell(); })">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="4 17 10 11 4 5"/>
               <line x1="12" y1="19" x2="20" y2="19"/>
@@ -1256,50 +1265,56 @@
   <script>
     // Terminal setup
     var term;
-    var websocket_term = new WebSocket(
-        (location.protocol === 'https:' ? 'wss:' : 'ws:') +
-        '//' + location.host + '/devices/' + deviceUdid + '/shell'
-    );
-    websocket_term.binaryType = "arraybuffer";
+    var websocket_term;
+    var shellInitialized = false;
 
     function ab2str(buf) {
       return String.fromCharCode.apply(null, new Uint8Array(buf));
     }
 
-    websocket_term.onopen = function(evt) {
-      term = new Terminal({
-        screenKeys: true,
-        useStyle: true,
-        cursorBlink: true,
-        theme: {
-          background: '#0a0a0a',
-          foreground: '#00ff41',
-          cursor: '#00ff41'
-       }
-     });
+    function initShell() {
+      if (shellInitialized) {
+        if (term) term.fit();
+        return;
+      }
+      shellInitialized = true;
 
-      term.on('data', function(data) {
-        websocket_term.send(new TextEncoder().encode("\x00" + data));
-     });
-      term.on('resize', function(evt) {
-        websocket_term.send(new TextEncoder().encode("\x01" + JSON.stringify({
-          cols: evt.cols,
-          rows: evt.rows
-       })));
-     });
+      websocket_term = new WebSocket(
+          (location.protocol === 'https:' ? 'wss:' : 'ws:') +
+          '//' + location.host + '/devices/' + deviceUdid + '/shell'
+      );
+      websocket_term.binaryType = "arraybuffer";
 
-      term.open(document.getElementById('xterm'));
-      term.fit();
+      websocket_term.onopen = function(evt) {
+        term = new Terminal({
+          screenKeys: true,
+          useStyle: true,
+          cursorBlink: true
+        });
 
-      websocket_term.onmessage = function(evt) {
-        if (evt.data instanceof ArrayBuffer) {
-          term.write(ab2str(evt.data));
-       }
-     };
-      websocket_term.onclose = function(evt) {
-        term.write("\r\n[SESSION_TERMINATED]");
-     };
-    };
+        term.on('data', function(data) {
+          websocket_term.send(new TextEncoder().encode("\x00" + data));
+        });
+        term.on('resize', function(evt) {
+          websocket_term.send(new TextEncoder().encode("\x01" + JSON.stringify({
+            cols: evt.cols,
+            rows: evt.rows
+          })));
+        });
+
+        term.open(document.getElementById('xterm'));
+        term.fit();
+
+        websocket_term.onmessage = function(evt) {
+          if (evt.data instanceof ArrayBuffer) {
+            term.write(ab2str(evt.data));
+          }
+        };
+        websocket_term.onclose = function(evt) {
+          term.write("\r\n[SESSION_TERMINATED]");
+        };
+      };
+    }
   </script>
 
   <script src="/static/js/nio-client.js"></script>

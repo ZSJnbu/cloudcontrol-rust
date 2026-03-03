@@ -1146,6 +1146,26 @@
                         </div>
                     </div>
 
+                    <!-- 截图管线计时瀑布图 -->
+                    <div v-if="timingWaterfall.total > 0" style="margin: 8px 0; padding: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; font-family: var(--term-font); font-size: 0.65rem;">
+                        <div style="color: var(--term-text-dim); margin-bottom: 6px;">
+                            截图管线 ({{ timingWaterfall.source || 'device' }}) — {{ timingWaterfall.raw_size }} → {{ timingWaterfall.scaled_size }}  {{ timingWaterfall.jpeg_kb }}KB
+                        </div>
+                        <div v-for="bar in timingBars" :key="bar.label" style="display: flex; align-items: center; margin: 2px 0; height: 14px;">
+                            <span style="width: 70px; color: var(--term-text-dim); text-align: right; padding-right: 6px;">{{ bar.label }}</span>
+                            <div style="flex: 1; position: relative; height: 10px; background: rgba(255,255,255,0.05); border-radius: 2px;">
+                                <div :style="{
+                                    width: bar.pct + '%',
+                                    height: '100%',
+                                    background: bar.color,
+                                    borderRadius: '2px',
+                                    minWidth: '2px'
+                                }"></div>
+                            </div>
+                            <span style="width: 50px; text-align: right; padding-left: 4px;" :style="{ color: bar.color }">{{ bar.ms }}ms</span>
+                        </div>
+                    </div>
+
                     <!-- 各设备性能 -->
                     <div class="gc-perf-devices">
                         <div v-for="(perf, index) in devicePerfList" :key="index" class="gc-perf-device-row">
@@ -1409,11 +1429,39 @@ window.app = new Vue({
         perfHistory: {
             screenshots: [],
             commands: []
+        },
+        // 计时瀑布图数据
+        timingWaterfall: {
+            capture: 0,
+            resize: 0,
+            jpeg_encode: 0,
+            base64: 0,
+            get_conn: 0,
+            total: 0,
+            source: '',
+            raw_size: '',
+            scaled_size: '',
+            jpeg_kb: 0
         }
     },
     computed: {
         deviceUrl: function() {
             return "http://" + this.device.ip + ":" + this.device.port;
+        },
+        timingBars: function() {
+            var t = this.timingWaterfall;
+            var total = Math.max(t.total, 1);
+            var bars = [
+                { label: 'capture', ms: t.capture, color: '#ff6b6b' },
+                { label: 'resize', ms: t.resize, color: '#ffd93d' },
+                { label: 'jpeg', ms: t.jpeg_encode, color: '#6bcb77' },
+                { label: 'base64', ms: t.base64, color: '#4d96ff' },
+                { label: 'conn', ms: t.get_conn, color: '#9b59b6' }
+            ];
+            for (var i = 0; i < bars.length; i++) {
+                bars[i].pct = Math.round((bars[i].ms / total) * 100);
+            }
+            return bars;
         }
     },
     mounted: function() {
@@ -1999,6 +2047,19 @@ window.app = new Vue({
                             var fetchTime = performance.now() - fetchStart;
                             // 更新截图性能统计
                             self.updateScreenshotPerf(Math.round(fetchTime));
+                            // 更新计时瀑布图 (HTTP 模式估算)
+                            self.timingWaterfall = {
+                                capture: Math.round(fetchTime * 0.7),
+                                resize: Math.round(fetchTime * 0.1),
+                                jpeg_encode: Math.round(fetchTime * 0.1),
+                                base64: 0,
+                                get_conn: Math.round(fetchTime * 0.1),
+                                total: Math.round(fetchTime),
+                                source: 'http',
+                                raw_size: bitmap.width + 'x' + bitmap.height,
+                                scaled_size: bitmap.width + 'x' + bitmap.height,
+                                jpeg_kb: 0
+                            };
                             var nextDelay = Math.max(1, adaptiveDelay - fetchTime);
                             setTimeout(fetchScreenshot, nextDelay);
                         }
