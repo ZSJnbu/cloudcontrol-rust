@@ -75,8 +75,8 @@ impl AtxInit {
     async fn check_port_alive(local_port: u16) -> bool {
         let url = format!("http://127.0.0.1:{}/jsonrpc/0", local_port);
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_millis(800))
+            .connect_timeout(Duration::from_millis(500))
             .build()
             .unwrap_or_default();
 

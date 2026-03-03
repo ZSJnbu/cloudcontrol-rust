@@ -84,17 +84,11 @@ async fn get_device_client(
 
 // ═══════════════ PAGE ROUTES ═══════════════
 
-/// GET / → index.html (static file response)
-pub async fn index(state: web::Data<AppState>) -> HttpResponse {
-    match state.tera.render("index.html", &tera::Context::new()) {
-        Ok(body) => HttpResponse::Ok().content_type("text/html").body(body),
-        Err(_) => {
-            // Fallback: serve as static file
-            HttpResponse::Ok()
-                .content_type("text/html")
-                .body("<h1>CloudControl</h1>")
-        }
-    }
+/// GET / → 302 redirect to /async
+pub async fn index(_state: web::Data<AppState>) -> HttpResponse {
+    HttpResponse::Found()
+        .append_header(("Location", "/async"))
+        .finish()
 }
 
 /// GET /devices/{udid}/remote → remote.html
@@ -122,6 +116,60 @@ pub async fn remote(
     ctx.insert("v", &json!({}));
 
     match state.tera.render("remote.html", &ctx) {
+        Ok(body) => HttpResponse::Ok().content_type("text/html").body(body),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Template error: {}", e)),
+    }
+}
+
+/// GET /async → device_synchronous.html (auto-load all online devices)
+pub async fn async_list_get(state: web::Data<AppState>) -> HttpResponse {
+    let phone_service = crate::services::phone_service::PhoneService::new(state.db.clone());
+    let devices = match phone_service.query_device_list_by_present().await {
+        Ok(d) => d,
+        Err(_) => vec![],
+    };
+
+    let mut ctx = tera::Context::new();
+
+    if devices.is_empty() {
+        ctx.insert("list", "[]");
+        ctx.insert("IP", "");
+        ctx.insert("Port", &0i64);
+        ctx.insert("Width", &0i64);
+        ctx.insert("Height", &0i64);
+        ctx.insert("Udid", "");
+        ctx.insert("deviceInfo", &json!({}));
+        ctx.insert("device", &json!({}));
+        ctx.insert("v", "");
+    } else {
+        let ip_list: Vec<Value> = devices.iter().map(|dev| {
+            let display = dev.get("display").cloned().unwrap_or(json!({"width":1080,"height":1920}));
+            json!({
+                "src": dev.get("ip").and_then(|v| v.as_str()).unwrap_or(""),
+                "des": dev.get("ip").and_then(|v| v.as_str()).unwrap_or(""),
+                "width": display.get("width").and_then(|v| v.as_i64()).unwrap_or(1080),
+                "height": display.get("height").and_then(|v| v.as_i64()).unwrap_or(1920),
+                "port": dev.get("port").and_then(|v| v.as_i64()).unwrap_or(9008),
+                "udid": dev.get("udid").and_then(|v| v.as_str()).unwrap_or(""),
+                "model": dev.get("model").and_then(|v| v.as_str()).unwrap_or(""),
+            })
+        }).collect();
+
+        let first = &devices[0];
+        let first_display = first.get("display").cloned().unwrap_or(json!({"width":1080,"height":1920}));
+
+        ctx.insert("list", &serde_json::to_string(&ip_list).unwrap_or_default());
+        ctx.insert("IP", first.get("ip").and_then(|v| v.as_str()).unwrap_or(""));
+        ctx.insert("Port", &first.get("port").and_then(|v| v.as_i64()).unwrap_or(9008));
+        ctx.insert("Width", &first_display.get("width").and_then(|v| v.as_i64()).unwrap_or(1080));
+        ctx.insert("Height", &first_display.get("height").and_then(|v| v.as_i64()).unwrap_or(1920));
+        ctx.insert("Udid", first.get("udid").and_then(|v| v.as_str()).unwrap_or(""));
+        ctx.insert("deviceInfo", &json!({}));
+        ctx.insert("device", &json!({}));
+        ctx.insert("v", "");
+    }
+
+    match state.tera.render("device_synchronous.html", &ctx) {
         Ok(body) => HttpResponse::Ok().content_type("text/html").body(body),
         Err(e) => HttpResponse::InternalServerError().body(format!("Template error: {}", e)),
     }
@@ -264,7 +312,22 @@ pub async fn inspector_screenshot(
             "encoding": "base64",
             "data": b64,
         })),
-        Err(e) => HttpResponse::InternalServerError().json(json!({"status":"error","message":e})),
+        Err(e) => {
+            // Fallback: ADB screencap
+            let serial = device.get("serial").and_then(|v| v.as_str()).unwrap_or("");
+            if !serial.is_empty() {
+                if let Ok(png_bytes) = Adb::screencap(serial).await {
+                    if let Ok(b64) = DeviceService::encode_screenshot(&png_bytes, quality, scale) {
+                        return HttpResponse::Ok().json(json!({
+                            "type": "jpeg",
+                            "encoding": "base64",
+                            "data": b64,
+                        }));
+                    }
+                }
+            }
+            HttpResponse::InternalServerError().json(json!({"status":"error","message":e}))
+        }
     }
 }
 
@@ -321,10 +384,22 @@ pub async fn inspector_screenshot_img(
     let sender = state.screenshot_cache.register_pending(&cache_key);
 
     let result = async {
-        let (_device, client) = get_device_client(&state, &udid).await?;
-        DeviceService::screenshot_jpeg(&client, quality, scale)
-            .await
-            .map_err(|e| HttpResponse::NotFound().body(e))
+        let (device, client) = get_device_client(&state, &udid).await?;
+        match DeviceService::screenshot_jpeg(&client, quality, scale).await {
+            Ok(bytes) => Ok(bytes),
+            Err(_) => {
+                // Fallback: ADB screencap
+                let serial = device.get("serial").and_then(|v| v.as_str()).unwrap_or("");
+                if !serial.is_empty() {
+                    if let Ok(png_bytes) = Adb::screencap(serial).await {
+                        if let Ok(jpeg_bytes) = DeviceService::raw_screenshot_to_jpeg(&png_bytes, quality, scale) {
+                            return Ok(jpeg_bytes);
+                        }
+                    }
+                }
+                Err(HttpResponse::NotFound().body("Screenshot failed"))
+            }
+        }
     }
     .await;
 
@@ -390,6 +465,8 @@ pub async fn inspector_touch(
     let x2 = body.get("x2").and_then(|v| v.as_f64()).unwrap_or(x as f64) as i32;
     let y2 = body.get("y2").and_then(|v| v.as_f64()).unwrap_or(y as f64) as i32;
     let duration = body.get("duration").and_then(|v| v.as_f64()).unwrap_or(200.0) / 1000.0;
+    let serial = device.get("serial").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let duration_ms = (duration * 1000.0) as i32;
 
     tokio::spawn(async move {
         let result = if action == "swipe" {
@@ -398,7 +475,17 @@ pub async fn inspector_touch(
             client.click(x, y).await
         };
         if let Err(e) = result {
-            tracing::error!("[TOUCH] Failed {}: {}", client.udid, e);
+            tracing::warn!("[TOUCH] u2 failed {}: {}, trying ADB fallback", client.udid, e);
+            if !serial.is_empty() {
+                let adb_result = if action == "swipe" {
+                    Adb::input_swipe(&serial, x, y, x2, y2, duration_ms.max(50).min(2000)).await
+                } else {
+                    Adb::input_tap(&serial, x, y).await
+                };
+                if let Err(e2) = adb_result {
+                    tracing::error!("[TOUCH] ADB fallback also failed {}: {}", client.udid, e2);
+                }
+            }
         }
     });
 
@@ -435,9 +522,15 @@ pub async fn inspector_input(
         return HttpResponse::Ok().json(json!({"status": "ok"}));
     }
 
+    let serial = device.get("serial").and_then(|v| v.as_str()).unwrap_or("").to_string();
     tokio::spawn(async move {
         if let Err(e) = client.input_text(&text).await {
-            tracing::error!("[INPUT] Failed {}: {}", client.udid, e);
+            tracing::warn!("[INPUT] u2 failed {}: {}, trying ADB fallback", client.udid, e);
+            if !serial.is_empty() {
+                if let Err(e2) = Adb::input_text(&serial, &text).await {
+                    tracing::error!("[INPUT] ADB fallback also failed {}: {}", client.udid, e2);
+                }
+            }
         }
     });
 
@@ -490,9 +583,15 @@ pub async fn inspector_keyevent(
     }
     .to_string();
 
+    let serial = device.get("serial").and_then(|v| v.as_str()).unwrap_or("").to_string();
     tokio::spawn(async move {
         if let Err(e) = client.press_key(&android_key).await {
-            tracing::error!("[KEYEVENT] Failed {}: {}", client.udid, e);
+            tracing::warn!("[KEYEVENT] u2 failed {}: {}, trying ADB fallback", client.udid, e);
+            if !serial.is_empty() {
+                if let Err(e2) = Adb::input_keyevent(&serial, &android_key).await {
+                    tracing::error!("[KEYEVENT] ADB fallback also failed {}: {}", client.udid, e2);
+                }
+            }
         }
     });
 
@@ -1160,4 +1259,140 @@ pub async fn reserved(
         }
         Err(_) => HttpResponse::InternalServerError().finish(),
     }
+}
+
+/// GET /devices/{udid}/shell → ADB Shell WebSocket (server-side proxy)
+pub async fn adb_shell_ws(
+    req: HttpRequest,
+    stream: web::Payload,
+    path: web::Path<String>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let udid = path.into_inner();
+    let phone_service = crate::services::phone_service::PhoneService::new(state.db.clone());
+    let device = match phone_service.query_info_by_udid(&udid).await {
+        Ok(Some(d)) => d,
+        _ => return HttpResponse::NotFound().body("Device not found"),
+    };
+
+    let serial = device
+        .get("serial")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&udid)
+        .to_string();
+
+    match actix_ws::handle(&req, stream) {
+        Ok((resp, session, msg_stream)) => {
+            actix_web::rt::spawn(async move {
+                adb_shell_session(session, msg_stream, serial).await;
+            });
+            resp
+        }
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+async fn adb_shell_session(
+    mut session: actix_ws::Session,
+    mut msg_stream: actix_ws::MessageStream,
+    serial: String,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Command;
+
+    tracing::info!("[ADB_SHELL] Starting adb shell for {}", serial);
+
+    let mut proc = match Command::new("adb")
+        .args(["-s", &serial, "shell"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("[ADB_SHELL] Failed to spawn adb: {}", e);
+            let _ = session
+                .text(format!("\r\n[ERROR] Failed to start adb shell: {}\r\n", e))
+                .await;
+            let _ = session.close(None).await;
+            return;
+        }
+    };
+
+    let mut stdout = proc.stdout.take().expect("stdout piped");
+    let mut stderr = proc.stderr.take().expect("stderr piped");
+    let mut stdin = proc.stdin.take().expect("stdin piped");
+
+    let session_clone = session.clone();
+
+    // Task: read stdout/stderr → send to WebSocket
+    let stdout_task = actix_web::rt::spawn(async move {
+        let mut session = session_clone;
+        let mut out_buf = [0u8; 4096];
+        let mut err_buf = [0u8; 4096];
+        loop {
+            tokio::select! {
+                result = stdout.read(&mut out_buf) => {
+                    match result {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if session.binary(out_buf[..n].to_vec()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                result = stderr.read(&mut err_buf) => {
+                    match result {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            if session.binary(err_buf[..n].to_vec()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        let _ = session.text("\r\n[SESSION_TERMINATED]").await;
+        let _ = session.close(None).await;
+    });
+
+    // Main loop: read WebSocket → write to stdin
+    while let Some(Ok(msg)) = msg_stream.next().await {
+        match msg {
+            actix_ws::Message::Text(text) => {
+                let text = text.to_string();
+                if text.starts_with('\x00') {
+                    if stdin.write_all(text[1..].as_bytes()).await.is_err() {
+                        break;
+                    }
+                    let _ = stdin.flush().await;
+                } else if text.starts_with('\x01') {
+                    // resize - not supported in raw adb shell
+                } else {
+                    if stdin.write_all(text.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    let _ = stdin.flush().await;
+                }
+            }
+            actix_ws::Message::Binary(data) => {
+                if stdin.write_all(&data).await.is_err() {
+                    break;
+                }
+                let _ = stdin.flush().await;
+            }
+            actix_ws::Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    // Cleanup
+    let _ = proc.kill().await;
+    stdout_task.abort();
+    tracing::info!("[ADB_SHELL] Session ended for {}", serial);
 }

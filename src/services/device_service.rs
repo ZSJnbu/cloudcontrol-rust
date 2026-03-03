@@ -71,6 +71,19 @@ impl DeviceService {
         Self::resize_jpeg(data, quality, 1.0)
     }
 
+    /// Convert raw image bytes (PNG/JPEG) to base64-encoded JPEG string.
+    /// Used as fallback when AtxClient screenshot fails.
+    pub fn encode_screenshot(raw_bytes: &[u8], quality: u8, scale: f64) -> Result<String, String> {
+        let jpeg_bytes = Self::resize_jpeg(raw_bytes, quality, scale)?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes))
+    }
+
+    /// Convert raw image bytes (PNG/JPEG) to JPEG bytes.
+    /// Used as fallback when AtxClient screenshot fails.
+    pub fn raw_screenshot_to_jpeg(raw_bytes: &[u8], quality: u8, scale: f64) -> Result<Vec<u8>, String> {
+        Self::resize_jpeg(raw_bytes, quality, scale)
+    }
+
     /// Dump and parse UI hierarchy to JSON.
     pub async fn dump_hierarchy(client: &AtxClient) -> Result<Value, String> {
         let xml = client.dump_hierarchy().await?;

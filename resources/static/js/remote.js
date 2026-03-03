@@ -1,23 +1,25 @@
 /* Javascript */
 $(function () {
-  $('.btn-copy')
-    .mouseleave(function () {
-      var $element = $(this);
-      $element.tooltip('hide').tooltip('disable');
+  try {
+    $('.btn-copy')
+      .mouseleave(function () {
+        var $element = $(this);
+        $element.tooltip('hide').tooltip('disable');
+      })
+
+    var clipboard = new Clipboard('.btn-copy');
+    clipboard.on('success', function (e) {
+      $(e.trigger)
+        .attr('title', 'Copied')
+        .tooltip('fixTitle')
+        .tooltip('enable')
+        .tooltip('show');
     })
 
-  var clipboard = new Clipboard('.btn-copy');
-  clipboard.on('success', function (e) {
-    $(e.trigger)
-      .attr('title', 'Copied')
-      .tooltip('fixTitle')
-      .tooltip('enable')
-      .tooltip('show');
-  })
-
-  $('[data-toggle=tooltip]').tooltip({
-    trigger: 'hover',
-  });
+    $('[data-toggle=tooltip]').tooltip({
+      trigger: 'hover',
+    });
+  } catch(e) { console.warn('Clipboard init skipped:', e.message); }
 })
 window.LOCAL_URL = '/'; // http://localhost:17310/';
 window.LOCAL_VERSION = '0.0.3';
@@ -72,6 +74,9 @@ window.app = new Vue({
     power:"755",
     path:"/data/local/tmp/",
     screenWS: null,
+    // scrcpy 模式状态
+    useScrcpyMode: false,
+    scrcpyClient: null,
     browserURL: "",
     logcat: {
       follow: true,
@@ -161,6 +166,30 @@ window.app = new Vue({
     },
     deviceUrl: function () {
       return "http://" + this.device.ip + ":" + this.device.port;
+    },
+    batteryLevel: function () {
+      return this.deviceInfo.battery ? this.deviceInfo.battery.level : 0;
+    },
+    batteryTemp: function () {
+      if (!this.deviceInfo.battery || this.deviceInfo.battery.temp == null) return '--';
+      return (this.deviceInfo.battery.temp / 10).toFixed(1) + '\u00B0C';
+    },
+    batteryStatus: function () {
+      if (!this.deviceInfo.battery) return '--';
+      if (this.deviceInfo.battery.acPowered) return 'AC';
+      if (this.deviceInfo.battery.usbPowered) return 'USB';
+      return 'DISCHARGE';
+    },
+    batteryClass: function () {
+      if (this.batteryLevel > 60) return '';
+      if (this.batteryLevel > 20) return 'yellow';
+      return 'red';
+    },
+    memoryPercent: function () {
+      if (!this.deviceInfo.memory) return 0;
+      var total = this.deviceInfo.memory.total;
+      if (total && total > 0) return 50;
+      return 0;
     }
   },
   mounted: function () {
@@ -190,29 +219,41 @@ window.app = new Vue({
     (function (that,_device) {
       that.deviceInfo = _device;
       document.title = _device.model;
-      $('#json-renderer').jsonViewer(device, {});
+      try { $('#json-renderer').jsonViewer(device, {}); } catch(e) {}
     })(this,device);
 
-    // 尝试使用 NIO 模式（更快），失败则回退到 HTTP 模式
-    // 添加超时保护，确保触控和屏幕流始终初始化
+    // 三级降级：scrcpy（硬件编码低延迟） → NIO（WebSocket截图） → HTTP（轮询）
     var httpModeInitialized = false;
     var initHttpMode = function() {
       if (httpModeInitialized) return;
       httpModeInitialized = true;
-      console.log('[NIO] 回退到 HTTP 模式');
+      console.log('[Fallback] 回退到 HTTP 模式');
       self.enableTouch();
       self.openScreenStream();
     };
 
-    // 3秒超时，如果NIO没连上就用HTTP模式
+    var initNIOMode = function() {
+      return self.tryNIOMode();
+    };
+
+    // 18秒超时保护，确保至少有一种模式能工作（scrcpy需要~10s启动）
     setTimeout(function() {
-      if (!self.useNIOMode) {
-        console.log('[NIO] 超时，使用 HTTP 模式');
+      if (!self.useScrcpyMode && !self.useNIOMode) {
+        console.log('[Fallback] 超时，使用 HTTP 模式');
         initHttpMode();
       }
-    }, 3000);
+    }, 18000);
 
-    this.tryNIOMode().catch(initHttpMode);
+    // 尝试 scrcpy → NIO → HTTP
+    this.tryScrcpyMode()
+      .catch(function(err) {
+        console.log('[Scrcpy] 不可用:', err.message || err, '，尝试 NIO 模式');
+        return initNIOMode();
+      })
+      .catch(function(err) {
+        console.log('[NIO] 不可用:', err.message || err, '，回退到 HTTP 模式');
+        initHttpMode();
+      });
 
     // reserveDevice 单独处理，失败也不影响主功能
     this.reserveDevice().catch(function(err) {
@@ -261,6 +302,179 @@ window.app = new Vue({
     this.loadPhrases()
   },
   methods: {
+    // Scrcpy 模式 — 硬件 H.264 编码，最低延迟
+    tryScrcpyMode: function() {
+      var self = this;
+      return new Promise(function(resolve, reject) {
+        // 检查 WebCodecs 支持
+        if (typeof ScrcpyClient === 'undefined' || !ScrcpyClient.isSupported()) {
+          reject(new Error('WebCodecs not supported'));
+          return;
+        }
+
+        // 先检查 scrcpy 是否可用
+        $.ajax({
+          url: '/scrcpy/' + self.deviceUdid + '/status',
+          method: 'GET',
+          dataType: 'json',
+          timeout: 3000
+        }).done(function(resp) {
+          if (!resp.available) {
+            reject(new Error('scrcpy not available: ' + (resp.reason || 'jar missing')));
+            return;
+          }
+
+          console.log('[Scrcpy] 状态检查通过，正在连接...');
+          var canvas = document.getElementById('bgCanvas');
+          var client = new ScrcpyClient(self.deviceUdid, canvas);
+
+          client.onInit = function(msg) {
+            console.log('[Scrcpy] 初始化完成: ' + msg.width + 'x' + msg.height);
+            // 停止已有的 HTTP/NIO 截图流
+            if (self.screenWS) {
+              try { self.screenWS.close(); } catch(e) {}
+              self.screenWS = null;
+            }
+            self.useScrcpyMode = true;
+            self.scrcpyClient = client;
+            self.loading = false;
+          };
+
+          client.onFrame = function() {
+            self.resizeScreen({
+              width: client.width,
+              height: client.height
+            });
+            // 更新 FPS
+            self.perfStats.fps = client.fps;
+          };
+
+          client.onDisconnect = function() {
+            console.log('[Scrcpy] 断开连接');
+            self.useScrcpyMode = false;
+            // 自动降级到 NIO
+            if (!self.useNIOMode) {
+              console.log('[Scrcpy] 尝试降级到 NIO 模式');
+              self.tryNIOMode().catch(function() {
+                self.enableTouch();
+                self.openScreenStream();
+              });
+            }
+          };
+
+          client.connect()
+            .then(function() {
+              console.log('[Scrcpy] 连接成功，启用 scrcpy 触控');
+              self.enableScrcpyTouch();
+
+              // 创建假的 screenWS 用于兼容 toggleScreen
+              self.screenWS = {
+                close: function() {
+                  client.disconnect();
+                }
+              };
+
+              resolve();
+            })
+            .catch(function(err) {
+              reject(err);
+            });
+
+        }).fail(function(err) {
+          reject(new Error('scrcpy status check failed'));
+        });
+      });
+    },
+
+    // Scrcpy 模式的触控 — 直接发送二进制触控，延迟 < 5ms
+    enableScrcpyTouch: function() {
+      var self = this;
+      var element = this.canvas.fg;
+      var screen = { bounds: {} };
+      var touchStart = null;
+
+      function calculateBounds() {
+        var el = element;
+        screen.bounds.w = el.offsetWidth;
+        screen.bounds.h = el.offsetHeight;
+        screen.bounds.x = 0;
+        screen.bounds.y = 0;
+        while (el.offsetParent) {
+          screen.bounds.x += el.offsetLeft;
+          screen.bounds.y += el.offsetTop;
+          el = el.offsetParent;
+        }
+      }
+
+      function activeFinger(index, x, y) {
+        $(".finger-" + index).addClass("active")
+          .css("transform", 'translate3d(' + x + 'px,' + y + 'px,0)');
+      }
+
+      function deactiveFinger(index) {
+        $(".finger-" + index).removeClass("active");
+      }
+
+      element.addEventListener('mousedown', function(e) {
+        if (e.which === 3) return; // ignore right click
+        e.preventDefault();
+        calculateBounds();
+
+        var xP = (e.pageX - screen.bounds.x) / screen.bounds.w;
+        var yP = (e.pageY - screen.bounds.y) / screen.bounds.h;
+        var client = self.scrcpyClient;
+        var devX = Math.floor(xP * client.width);
+        var devY = Math.floor(yP * client.height);
+
+        touchStart = { xP: xP, yP: yP, devX: devX, devY: devY };
+
+        // Send touch down immediately
+        client.sendTouch(0, devX, devY, client.width, client.height, 0xFFFF);
+        activeFinger(0, e.pageX, e.pageY);
+
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+      });
+
+      function onMouseMove(e) {
+        if (!touchStart) return;
+        e.preventDefault();
+        calculateBounds();
+
+        var xP = (e.pageX - screen.bounds.x) / screen.bounds.w;
+        var yP = (e.pageY - screen.bounds.y) / screen.bounds.h;
+        var client = self.scrcpyClient;
+        var devX = Math.floor(xP * client.width);
+        var devY = Math.floor(yP * client.height);
+
+        touchStart.endDevX = devX;
+        touchStart.endDevY = devY;
+
+        // Send touch move for real-time dragging
+        client.sendTouch(2, devX, devY, client.width, client.height, 0xFFFF);
+        activeFinger(0, e.pageX, e.pageY);
+      }
+
+      function onMouseUp(e) {
+        if (!touchStart) return;
+        e.preventDefault();
+        deactiveFinger(0);
+
+        var client = self.scrcpyClient;
+        var x = touchStart.endDevX !== undefined ? touchStart.endDevX : touchStart.devX;
+        var y = touchStart.endDevY !== undefined ? touchStart.endDevY : touchStart.devY;
+
+        // Send touch up
+        client.sendTouch(1, x, y, client.width, client.height, 0);
+
+        touchStart = null;
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+      }
+
+      console.log('[Scrcpy] 触控已启用（二进制协议，延迟 <5ms）');
+    },
+
     // NIO WebSocket 模式 - 更快的通信
     tryNIOMode: function() {
       var self = this;
@@ -2209,7 +2423,7 @@ window.app = new Vue({
 // 确保触控始终初始化的备用方案
 window.addEventListener('load', function() {
   setTimeout(function() {
-    if (window.app && !window.app.control) {
+    if (window.app && !window.app.control && !window.app.useScrcpyMode) {
       console.log('[Fallback] 强制初始化触控和屏幕流');
       try {
         window.app.enableTouch();

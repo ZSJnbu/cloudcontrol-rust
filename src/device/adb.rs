@@ -75,7 +75,14 @@ impl Adb {
             .await
             .map_err(|e| format!("adb push failed: {}", e))?;
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!("adb push failed (exit {}): {} {}", output.status, stderr, stdout));
+        }
+
+        let result = String::from_utf8_lossy(&output.stderr).to_string();
+        Ok(result)
     }
 
     /// Get a device property via `adb -s <serial> shell getprop <prop>`.
@@ -112,6 +119,49 @@ impl Adb {
     /// Check if a serial is a USB serial (vs WiFi IP:PORT).
     pub fn is_usb_serial(serial: &str) -> bool {
         !serial.contains(':')
+    }
+
+    /// Tap at (x, y) via `adb -s <serial> shell input tap x y`.
+    pub async fn input_tap(serial: &str, x: i32, y: i32) -> Result<(), String> {
+        Self::shell(serial, &format!("input tap {} {}", x, y)).await?;
+        Ok(())
+    }
+
+    /// Swipe via `adb -s <serial> shell input swipe x1 y1 x2 y2 duration_ms`.
+    pub async fn input_swipe(serial: &str, x1: i32, y1: i32, x2: i32, y2: i32, duration_ms: i32) -> Result<(), String> {
+        Self::shell(serial, &format!("input swipe {} {} {} {} {}", x1, y1, x2, y2, duration_ms)).await?;
+        Ok(())
+    }
+
+    /// Input text via `adb -s <serial> shell input text <text>`.
+    pub async fn input_text(serial: &str, text: &str) -> Result<(), String> {
+        // Escape special characters for shell
+        let escaped = text.replace('\\', "\\\\").replace(' ', "%s").replace('\"', "\\\"");
+        Self::shell(serial, &format!("input text \"{}\"", escaped)).await?;
+        Ok(())
+    }
+
+    /// Send keyevent via `adb -s <serial> shell input keyevent <keycode>`.
+    pub async fn input_keyevent(serial: &str, keycode: &str) -> Result<(), String> {
+        // Map common key names to Android keycodes
+        let code = match keycode {
+            "home" => "KEYCODE_HOME",
+            "back" => "KEYCODE_BACK",
+            "enter" => "KEYCODE_ENTER",
+            "del" => "KEYCODE_DEL",
+            "forward_del" => "KEYCODE_FORWARD_DEL",
+            "tab" => "KEYCODE_TAB",
+            "menu" => "KEYCODE_MENU",
+            "power" => "KEYCODE_POWER",
+            "wakeup" => "KEYCODE_WAKEUP",
+            "dpad_up" => "KEYCODE_DPAD_UP",
+            "dpad_down" => "KEYCODE_DPAD_DOWN",
+            "dpad_left" => "KEYCODE_DPAD_LEFT",
+            "dpad_right" => "KEYCODE_DPAD_RIGHT",
+            other => other,
+        };
+        Self::shell(serial, &format!("input keyevent {}", code)).await?;
+        Ok(())
     }
 
     /// Set up `adb -s <serial> forward tcp:0 tcp:<remote_port>` and return the assigned local port.
@@ -172,6 +222,61 @@ impl Adb {
         Err(format!(
             "Failed to determine forwarded port. stdout={}, stderr={}",
             stdout, stderr
+        ))
+    }
+
+    /// Take a screenshot via `adb -s <serial> exec-out screencap -p` → returns PNG bytes.
+    /// This is a fallback when u2 server is not available.
+    pub async fn screencap(serial: &str) -> Result<Vec<u8>, String> {
+        let output = Command::new("adb")
+            .args(["-s", serial, "exec-out", "screencap", "-p"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| format!("adb screencap failed: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("adb screencap error: {}", stderr));
+        }
+
+        if output.stdout.is_empty() {
+            return Err("adb screencap returned empty data".to_string());
+        }
+
+        Ok(output.stdout)
+    }
+
+    /// Set up `adb -s <serial> forward tcp:0 localabstract:<name>` and return the assigned local port.
+    pub async fn forward_abstract(serial: &str, name: &str) -> Result<u16, String> {
+        let output = Command::new("adb")
+            .args([
+                "-s",
+                serial,
+                "forward",
+                "tcp:0",
+                &format!("localabstract:{}", name),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| format!("adb forward abstract failed: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        if let Ok(port) = stdout.parse::<u16>() {
+            return Ok(port);
+        }
+        if let Ok(port) = stderr.parse::<u16>() {
+            return Ok(port);
+        }
+
+        Err(format!(
+            "Failed to determine forwarded port for abstract:{}. stdout={}, stderr={}",
+            name, stdout, stderr
         ))
     }
 

@@ -753,6 +753,58 @@
     .jstree-default .jstree-hovered {
       background: rgba(0, 255, 65, 0.1) !important;
     }
+
+    /* ===== Enhanced Device Info Panel ===== */
+    .term-device-header {
+      padding: 16px 0;
+      border-bottom: 1px dashed var(--term-border);
+      margin-bottom: 16px;
+    }
+    .term-device-name {
+      font-size: 1.3rem;
+      color: var(--term-green);
+      font-weight: bold;
+      font-family: var(--term-font);
+    }
+    .term-device-subtitle {
+      font-size: 0.85rem;
+      color: var(--term-text-dim);
+      margin-top: 4px;
+      font-family: var(--term-font);
+    }
+    .term-monitor-item {
+      margin: 12px 0;
+    }
+    .term-monitor-label {
+      font-size: 0.7rem;
+      color: var(--term-text-dim);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      font-family: var(--term-font);
+      letter-spacing: 0.05em;
+    }
+    .term-progress-bar {
+      height: 8px;
+      background: var(--term-bg-dark);
+      border: 1px solid var(--term-border);
+    }
+    .term-progress-fill {
+      height: 100%;
+      background: var(--term-green);
+      transition: width 0.3s;
+    }
+    .term-progress-fill.yellow {
+      background: var(--term-yellow, #ffff00);
+    }
+    .term-progress-fill.red {
+      background: var(--term-red);
+    }
+    .term-monitor-detail {
+      font-size: 0.75rem;
+      color: var(--term-text-dim);
+      margin-top: 4px;
+      font-family: var(--term-font);
+    }
   </style>
 </head>
 <body class="term-body">
@@ -977,45 +1029,63 @@
         <div class="term-tab-content">
           <!-- Home Tab -->
           <div class="term-tab-pane" :class="{active: activeTab === 'home'}">
-            <div class="term-section-header">
-              <span class="term-prompt">root@device</span>:<span class="term-path">~</span>$ cat /proc/device_info
+            <!-- [1] 设备概览 -->
+            <div class="term-device-header">
+              <div class="term-device-name">[[deviceInfo.brand || '--']] [[deviceInfo.model || '--']]</div>
+              <div class="term-device-subtitle">Android [[deviceInfo.version || '--']] | SDK [[deviceInfo.sdk || '--']]</div>
             </div>
 
-            <div class="term-info-grid" style="margin-top: 12px;">
+            <div class="term-info-grid" style="grid-template-columns: repeat(3, 1fr);">
               <div class="term-info-item">
-                <div class="term-info-label">BRAND</div>
-                <div class="term-info-value">[[deviceInfo.brand || '--']]</div>
+                <div class="term-info-label">SERIAL</div>
+                <div class="term-info-value" style="font-size:0.8rem">[[deviceInfo.serial || '--']]</div>
               </div>
               <div class="term-info-item">
-                <div class="term-info-label">MODEL</div>
-                <div class="term-info-value">[[deviceInfo.model || '--']]</div>
+                <div class="term-info-label">UDID</div>
+                <div class="term-info-value" style="font-size:0.75rem; word-break:break-all;">[[deviceInfo.udid || '--']]</div>
               </div>
               <div class="term-info-item">
-                <div class="term-info-label">ANDROID</div>
-                <div class="term-info-value">[[deviceInfo.version || '--']]</div>
+                <div class="term-info-label">IP:PORT</div>
+                <div class="term-info-value">[[deviceInfo.ip || '--']]:[[deviceInfo.port || '--']]</div>
               </div>
-              <div class="term-info-item">
-                <div class="term-info-label">SDK</div>
-                <div class="term-info-value">[[deviceInfo.sdk || '--']]</div>
+            </div>
+
+            <!-- [2] 硬件监控 -->
+            <div class="term-section-header" style="margin-top: 20px;">
+              <span class="term-prompt">root@device</span>:<span class="term-path">~</span>$ cat /proc/hw_status
+            </div>
+
+            <!-- 电池 -->
+            <div class="term-monitor-item">
+              <div class="term-monitor-label">BATTERY</div>
+              <div class="term-progress-bar">
+                <div class="term-progress-fill" :style="{width: batteryLevel + '%'}" :class="batteryClass"></div>
               </div>
+              <div class="term-monitor-detail">[[batteryLevel]]% · [[batteryTemp]] · [[batteryStatus]]</div>
+            </div>
+
+            <!-- 内存 -->
+            <div class="term-monitor-item">
+              <div class="term-monitor-label">MEMORY</div>
+              <div class="term-progress-bar">
+                <div class="term-progress-fill" :style="{width: memoryPercent + '%'}"></div>
+              </div>
+              <div class="term-monitor-detail">[[deviceInfo.memory ? deviceInfo.memory.around : '--']]</div>
+            </div>
+
+            <!-- 显示 + CPU -->
+            <div class="term-info-grid" style="grid-template-columns: repeat(2, 1fr); margin-top: 12px;">
               <div class="term-info-item">
                 <div class="term-info-label">DISPLAY</div>
-                <div class="term-info-value">[[deviceInfo.display ? deviceInfo.display.width + 'x' + deviceInfo.display.height : '--']]</div>
-              </div>
-              <div class="term-info-item">
-                <div class="term-info-label">MEMORY</div>
-                <div class="term-info-value">[[deviceInfo.memory ? deviceInfo.memory.around : '--']]</div>
+                <div class="term-info-value">[[deviceInfo.display ? deviceInfo.display.width+'x'+deviceInfo.display.height : '--']]</div>
               </div>
               <div class="term-info-item">
                 <div class="term-info-label">CPU</div>
-                <div class="term-info-value">[[deviceInfo.cpu ? deviceInfo.cpu.cores + ' cores' : '--']]</div>
-              </div>
-              <div class="term-info-item">
-                <div class="term-info-label">IP_ADDR</div>
-                <div class="term-info-value">[[deviceInfo.ip || device.ip]]</div>
+                <div class="term-info-value">[[deviceInfo.cpu ? deviceInfo.cpu.cores+' cores' : '--']]</div>
               </div>
             </div>
 
+            <!-- [3] 快捷操作 -->
             <div class="term-section-header" style="margin-top: 24px;">
               <span class="term-prompt">root@device</span>:<span class="term-path">~</span>$ ./quick_actions.sh
             </div>
@@ -1032,6 +1102,12 @@
               </button>
               <button class="term-btn term-btn-secondary" @click="runShell('monkey -p com.tencent.mm -c android.intent.category.LAUNCHER 1')">
                 [WECHAT]
+              </button>
+              <button class="term-btn term-btn-secondary" @click="runShell('screencap -p /sdcard/screenshot.png')">
+                [SCREENSHOT]
+              </button>
+              <button class="term-btn term-btn-secondary" @click="runShell('reboot')">
+                [REBOOT]
               </button>
             </div>
 
@@ -1180,7 +1256,10 @@
   <script>
     // Terminal setup
     var term;
-    var websocket_term = new WebSocket("ws://" + deviceIp + ":7912/term");
+    var websocket_term = new WebSocket(
+        (location.protocol === 'https:' ? 'wss:' : 'ws:') +
+        '//' + location.host + '/devices/' + deviceUdid + '/shell'
+    );
     websocket_term.binaryType = "arraybuffer";
 
     function ab2str(buf) {
@@ -1224,6 +1303,7 @@
   </script>
 
   <script src="/static/js/nio-client.js"></script>
+  <script src="/static/js/scrcpy-client.js"></script>
   <script src="/static/js/remote.js?v=4"></script>
 
   <script>

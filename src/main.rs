@@ -101,6 +101,7 @@ async fn main() -> std::io::Result<()> {
                 "/devices/{udid}/remote",
                 web::get().to(routes::control::remote),
             )
+            .route("/async", web::get().to(routes::control::async_list_get))
             .route("/async", web::post().to(routes::control::async_list_page))
             .route(
                 "/installfile",
@@ -178,12 +179,26 @@ async fn main() -> std::io::Result<()> {
                 "/devices/{query}/reserved",
                 web::get().to(routes::control::reserved),
             )
+            // ── ADB Shell WebSocket ──
+            .route(
+                "/devices/{udid}/shell",
+                web::get().to(routes::control::adb_shell_ws),
+            )
             // ── NIO WebSocket ──
             .route(
                 "/nio/{udid}/ws",
                 web::get().to(routes::nio::nio_websocket),
             )
             .route("/nio/stats", web::get().to(routes::nio::nio_stats))
+            // ── Scrcpy WebSocket ──
+            .route(
+                "/scrcpy/{udid}/ws",
+                web::get().to(routes::scrcpy_ws::scrcpy_websocket),
+            )
+            .route(
+                "/scrcpy/{udid}/status",
+                web::get().to(routes::scrcpy_ws::scrcpy_status),
+            )
             // ── Static files ──
             .service(fs::Files::new("/static", "resources/static").show_files_listing())
     })

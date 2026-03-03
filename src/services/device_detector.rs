@@ -1,9 +1,10 @@
 use crate::device::adb::Adb;
 use crate::device::atx_init::AtxInit;
 use crate::services::phone_service::PhoneService;
+use crate::services::scrcpy_manager::ScrcpyManager;
 use chrono::Utc;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -12,7 +13,8 @@ use tokio::task::JoinHandle;
 /// Replaces Python `device_detector.py`.
 pub struct DeviceDetector {
     phone_service: PhoneService,
-    known_devices: Arc<Mutex<HashSet<String>>>,
+    /// Maps serial → udid for known connected devices
+    known_devices: Arc<Mutex<HashMap<String, String>>>,
     poll_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -21,7 +23,7 @@ impl DeviceDetector {
     pub fn new(phone_service: PhoneService) -> Self {
         Self {
             phone_service,
-            known_devices: Arc::new(Mutex::new(HashSet::new())),
+            known_devices: Arc::new(Mutex::new(HashMap::new())),
             poll_handle: Mutex::new(None),
         }
     }
@@ -118,7 +120,7 @@ impl DeviceDetector {
     /// Synchronize: detect new and disconnected devices.
     async fn sync_devices(
         phone_service: &PhoneService,
-        known_devices: &Arc<Mutex<HashSet<String>>>,
+        known_devices: &Arc<Mutex<HashMap<String, String>>>,
     ) {
         let current = match Adb::list_devices().await {
             Ok(devices) => devices,
@@ -132,7 +134,7 @@ impl DeviceDetector {
 
         // Detect new devices
         for serial in &current {
-            if !known.contains(serial) {
+            if !known.contains_key(serial) {
                 tracing::info!("[Detector] New device found: {}", serial);
 
                 // Get device info
@@ -143,36 +145,56 @@ impl DeviceDetector {
                         .unwrap_or("")
                         .to_string();
 
-                    // Initialize atx-agent
-                    if let Err(e) = AtxInit::init_device(serial).await {
-                        tracing::warn!("[Detector] atx-agent init failed for {}: {}", serial, e);
-                    }
-
-                    // Register to DB
+                    // Register to DB first (non-blocking)
                     if let Err(e) = phone_service.update_field(&udid, &info).await {
                         tracing::error!("[Detector] Failed to register device {}: {}", serial, e);
                     } else {
                         tracing::info!("[Detector] Device registered: {}", udid);
                     }
-                }
 
-                known.insert(serial.clone());
+                    // Initialize u2 server in background (don't block detection loop)
+                    let serial_clone = serial.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = AtxInit::init_device(&serial_clone).await {
+                            tracing::warn!("[Detector] u2 init failed for {}: {}", serial_clone, e);
+                        }
+                    });
+
+                    // Push scrcpy-server.jar in background
+                    if ScrcpyManager::jar_available() {
+                        let serial_for_scrcpy = serial.clone();
+                        tokio::spawn(async move {
+                            let mgr = ScrcpyManager::new();
+                            if let Err(e) = mgr.ensure_scrcpy_ready(&serial_for_scrcpy).await {
+                                tracing::warn!(
+                                    "[Detector] scrcpy-server.jar push failed for {}: {}",
+                                    serial_for_scrcpy,
+                                    e
+                                );
+                            }
+                        });
+                    }
+
+                    known.insert(serial.clone(), udid);
+                }
             }
         }
 
         // Detect disconnected devices
-        let disconnected: Vec<String> = known
+        let disconnected: Vec<(String, String)> = known
             .iter()
-            .filter(|s| !current.contains(*s))
-            .cloned()
+            .filter(|(serial, _)| !current.contains(*serial))
+            .map(|(s, u)| (s.clone(), u.clone()))
             .collect();
 
-        for serial in &disconnected {
-            tracing::info!("[Detector] Device disconnected: {}", serial);
+        for (serial, udid) in &disconnected {
+            tracing::info!("[Detector] Device disconnected: {} ({})", serial, udid);
             known.remove(serial);
 
-            // We don't have a direct serial→udid mapping here, so we'll just log.
-            // The heartbeat mechanism handles offline marking.
+            // Mark device as offline in the database
+            if let Err(e) = phone_service.offline_connected(udid).await {
+                tracing::error!("[Detector] Failed to mark device offline {}: {}", udid, e);
+            }
         }
     }
 

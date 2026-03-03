@@ -1387,7 +1387,7 @@ window.app = new Vue({
         rotation: 0,
         cursor: {},
         inputText: '',  // 文本输入框内容
-        targetMode: 'all',  // 目标模式: 'all', 'master', 'selected'
+        targetMode: 'master',  // 目标模式: 'all', 'master', 'selected'
         // 快捷短语
         phrases: [],
         newPhrase: '',
@@ -2034,17 +2034,36 @@ window.app = new Vue({
                 batchDelay: 8, // 8ms 批处理窗口
 
                 // 使用 fetch + keepalive 发送命令 (不阻塞)
+                // params 中的坐标使用百分比 (xP, yP)，按每个目标设备分辨率转换
                 sendToTargetDevices: function(action, params) {
                     var targets = self.getTargetDevices();
-                    var payload = JSON.stringify(Object.assign({ action: action }, params));
                     var cmdStart = performance.now();
                     console.log('[TOUCH] Sending to', targets.length, 'device(s):', action, params);
 
                     // 并行发送到目标设备
                     for (var i = 0; i < targets.length; i++) {
-                        (function(udid) {
+                        (function(device) {
+                            var udid = device.udid;
                             var url = '/inspector/' + udid + '/touch';
                             var deviceCmdStart = performance.now();
+
+                            // 按目标设备分辨率转换百分比坐标为像素坐标
+                            var devW = device.width || 1080;
+                            var devH = device.height || 1920;
+                            var deviceParams = { action: action };
+                            if (params.xP !== undefined && params.yP !== undefined) {
+                                deviceParams.x = Math.floor(params.xP * devW);
+                                deviceParams.y = Math.floor(params.yP * devH);
+                            }
+                            if (params.x2P !== undefined && params.y2P !== undefined) {
+                                deviceParams.x2 = Math.floor(params.x2P * devW);
+                                deviceParams.y2 = Math.floor(params.y2P * devH);
+                            }
+                            if (params.duration !== undefined) {
+                                deviceParams.duration = params.duration;
+                            }
+
+                            var payload = JSON.stringify(deviceParams);
 
                             // 使用 fetch (非阻塞)
                             fetch(url, {
@@ -2066,20 +2085,20 @@ window.app = new Vue({
                                 console.error('[TOUCH] Error sending to', udid, ':', err);
                                 self.updateDevicePerf(udid, latency, false);
                             });
-                        })(targets[i].udid);
+                        })(targets[i]);
                     }
                 },
 
-                // 立即发送点击 (最低延迟)
-                sendClickImmediate: function(x, y) {
-                    this.sendToTargetDevices('click', { x: x, y: y });
+                // 立即发送点击 (最低延迟) - 使用百分比坐标
+                sendClickImmediate: function(xP, yP) {
+                    this.sendToTargetDevices('click', { xP: xP, yP: yP });
                 },
 
-                // 批量发送滑动轨迹
-                sendSwipeImmediate: function(x1, y1, x2, y2, duration) {
+                // 批量发送滑动轨迹 - 使用百分比坐标
+                sendSwipeImmediate: function(xP1, yP1, xP2, yP2, duration) {
                     this.sendToTargetDevices('swipe', {
-                        x: x1, y: y1,
-                        x2: x2, y2: y2,
+                        xP: xP1, yP: yP1,
+                        x2P: xP2, y2P: yP2,
                         duration: duration || 200
                     });
                 },
@@ -2114,42 +2133,34 @@ window.app = new Vue({
                         return;
                     }
 
-                    // 获取设备实际分辨率 (从 self.deviceList，包含真实分辨率)
-                    var masterDevice = self.deviceList[self.masterIndex] || self.deviceList[0];
-
-                    // 使用设备实际分辨率，不是缩放后的 canvas 尺寸
-                    var deviceWidth = masterDevice ? masterDevice.width : 1080;
-                    var deviceHeight = masterDevice ? masterDevice.height : 1920;
-
-                    var startX = Math.floor(this.touchStart.xP * deviceWidth);
-                    var startY = Math.floor(this.touchStart.yP * deviceHeight);
+                    var startXP = this.touchStart.xP;
+                    var startYP = this.touchStart.yP;
 
                     // 获取最后的触点
                     var lastPoint = this.touchPoints[this.touchPoints.length - 1] || this.touchStart;
-                    var endX = Math.floor(lastPoint.xP * deviceWidth);
-                    var endY = Math.floor(lastPoint.yP * deviceHeight);
+                    var endXP = lastPoint.xP;
+                    var endYP = lastPoint.yP;
 
-                    // 计算移动距离
-                    var deltaXP = Math.abs(lastPoint.xP - this.touchStart.xP);
-                    var deltaYP = Math.abs(lastPoint.yP - this.touchStart.yP);
+                    // 计算移动距离 (百分比)
+                    var deltaXP = Math.abs(endXP - startXP);
+                    var deltaYP = Math.abs(endYP - startYP);
 
                     // 计算持续时间
                     var duration = performance.now() - this.touchStart.time;
 
                     console.log('[TOUCH] touchUp:', {
-                        start: { x: startX, y: startY },
-                        end: { x: endX, y: endY },
-                        delta: { xP: deltaXP, yP: deltaYP },
-                        deviceSize: { w: deviceWidth, h: deviceHeight }
+                        start: { xP: startXP, yP: startYP },
+                        end: { xP: endXP, yP: endYP },
+                        delta: { xP: deltaXP, yP: deltaYP }
                     });
 
                     if (deltaXP > this.swipeThreshold || deltaYP > this.swipeThreshold) {
                         // 滑动操作 - 根据实际滑动时间调整
                         var swipeDuration = Math.min(Math.max(duration * 0.8, 100), 500);
-                        this.sendSwipeImmediate(startX, startY, endX, endY, Math.floor(swipeDuration));
+                        this.sendSwipeImmediate(startXP, startYP, endXP, endYP, Math.floor(swipeDuration));
                     } else {
-                        // 点击操作
-                        this.sendClickImmediate(startX, startY);
+                        // 点击操作 - 发送百分比，由 sendToTargetDevices 按设备分辨率转换
+                        this.sendClickImmediate(startXP, startYP);
                     }
 
                     // 清理状态
@@ -2161,16 +2172,11 @@ window.app = new Vue({
             };
 
             function calculateBounds() {
-                var el = element;
-                screen.bounds.w = el.offsetWidth;
-                screen.bounds.h = el.offsetHeight;
-                screen.bounds.x = 0;
-                screen.bounds.y = 0;
-                while (el.offsetParent) {
-                    screen.bounds.x += el.offsetLeft;
-                    screen.bounds.y += el.offsetTop;
-                    el = el.offsetParent;
-                }
+                var rect = element.getBoundingClientRect();
+                screen.bounds.w = rect.width;
+                screen.bounds.h = rect.height;
+                screen.bounds.x = rect.left + (window.scrollX || window.pageXOffset || 0);
+                screen.bounds.y = rect.top + (window.scrollY || window.pageYOffset || 0);
             }
 
             function activeFinger(index, x, y) {
@@ -2293,26 +2299,26 @@ window.app = new Vue({
                 var x = e.pageX - screen.bounds.x;
                 var y = e.pageY - screen.bounds.y;
 
+                var xP = x / screen.bounds.w;
                 if (!fromYP) {
                     fromYP = y / screen.bounds.h;
-                    wheelStartX = x;
+                    wheelStartXP = xP;
                 }
 
                 var toYP = fromYP + (event.wheelDeltaY < 0 ? -0.1 : 0.1);
                 toYP = Math.max(0.1, Math.min(0.9, toYP));
 
-                // 发送滑动命令到目标设备
-                var canvas = self.canvas.bg;
-                var x1 = Math.floor((wheelStartX / screen.bounds.w) * canvas.width);
-                var y1 = Math.floor(fromYP * canvas.height);
-                var y2 = Math.floor(toYP * canvas.height);
-
-                control.sendToTargetDevices('swipe', { x: x1, y: y1, x2: x1, y2: y2 });
+                // 发送滑动命令到目标设备 (使用百分比坐标)
+                control.sendToTargetDevices('swipe', {
+                    xP: wheelStartXP, yP: fromYP,
+                    x2P: wheelStartXP, y2P: toYP,
+                    duration: 200
+                });
 
                 fromYP = toYP;
                 mouseWheelDelayTouchUp();
             }
-            var wheelStartX = 0;
+            var wheelStartXP = 0;
 
             element.addEventListener('mousedown', mouseDownListener);
             element.addEventListener('mousewheel', mouseWheelListener);
